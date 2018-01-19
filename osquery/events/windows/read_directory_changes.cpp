@@ -15,11 +15,11 @@ namespace fs = boost::filesystem;
 namespace osquery {
 
 std::map<int, std::string> kMaskActions = {
-    {FILE_ACTION_ADDED, "ADDED"},
-    {FILE_ACTION_REMOVED, "REMOVED"},
-    {FILE_ACTION_MODIFIED, "MODIFIED"},
-    {FILE_ACTION_RENAMED_OLD_NAME, "RENAMED_OLD_NAME"},
-    {FILE_ACTION_RENAMED_NEW_NAME, "RENAMED_NEW_NAME"},
+    {FILE_ACTION_ADDED, "CREATED"},
+    {FILE_ACTION_REMOVED, "DELETED"},
+    {FILE_ACTION_MODIFIED, "UPDATED"},
+    {FILE_ACTION_RENAMED_OLD_NAME, "MOVED_FROM"},
+    {FILE_ACTION_RENAMED_NEW_NAME, "MOVED_TO"},
 };
 
 REGISTER(RDChangesEventPublisher, "event_publisher", "rdchanges");
@@ -50,14 +50,17 @@ void RDChangesEventPublisher::tearDown() {
 void RDChangesEventPublisher::configure() {
   buildExcludePathsSet();
 
+  paths_.clear();
   for (auto& sub : subscriptions_) {
     auto sc = getSubscriptionContext(sub->context);
-    monitorSubscription(sc);
+    auto paths = monitorSubscription(sc);
+    paths_.insert(paths.begin(), paths.end());
   }
 }
 
-bool RDChangesEventPublisher::monitorSubscription(
-    RDChangesSubscriptionContextRef& sc, bool add_watch) {
+std::set<std::string> RDChangesEventPublisher::monitorSubscription(
+    RDChangesSubscriptionContextRef& sc) {
+  std::set<std::string> rpaths;
   std::string discovered = sc->path;
   if (sc->path.find("**") != std::string::npos) {
     sc->recursive = true;
@@ -79,9 +82,10 @@ bool RDChangesEventPublisher::monitorSubscription(
       resolveFilePattern(discovered, paths);
       sc->recursive_match = sc->recursive;
       for (const auto& _path : paths) {
-        addMonitor(_path, sc, sc->recursive, add_watch);
+        rpaths.insert(_path);
+        addMonitor(_path, sc, sc->recursive);
       }
-      return true;
+      return rpaths;
     }
   }
 
@@ -89,7 +93,10 @@ bool RDChangesEventPublisher::monitorSubscription(
     sc->path += '/';
     discovered += '/';
   }
-  return addMonitor(discovered, sc, sc->recursive, add_watch);
+
+  addMonitor(discovered, sc, sc->recursive);
+  rpaths.insert(discovered);
+  return rpaths;
 }
 
 void RDChangesEventPublisher::buildExcludePathsSet() {
@@ -111,13 +118,15 @@ void RDChangesEventPublisher::buildExcludePathsSet() {
 
 bool RDChangesEventPublisher::addMonitor(const std::string& path,
                                        RDChangesSubscriptionContextRef& sc,
-                                       bool recursive,
-                                       bool add_watch) {
+                                       bool recursive) {
   {
     rdcp::CReadChangesRequest* request;
-    const DWORD filter = FILE_NOTIFY_CHANGE_LAST_WRITE
-                         | FILE_NOTIFY_CHANGE_CREATION
-                         | FILE_NOTIFY_CHANGE_FILE_NAME;
+    const DWORD filter = FILE_NOTIFY_CHANGE_FILE_NAME
+                         | FILE_NOTIFY_CHANGE_DIR_NAME
+                         | FILE_NOTIFY_CHANGE_ATTRIBUTES
+                         | FILE_NOTIFY_CHANGE_SIZE
+                         | FILE_NOTIFY_CHANGE_LAST_WRITE
+                         | FILE_NOTIFY_CHANGE_SECURITY;
     if (!thread)
       thread = (HANDLE)_beginthreadex(NULL, 0, rdcp::CReadChangesServer::ThreadStartProc,
                                       server, 0, &thread_id);
@@ -170,6 +179,10 @@ bool RDChangesEventPublisher::shouldFire(const RDChangesSubscriptionContextRef& 
     return false;
   }
   return true;
+}
+
+size_t RDChangesEventPublisher::numSubscriptionedPaths() const {
+  return paths_.size();
 }
 
 bool RDChangesEventPublisher::Pop(DWORD& action, CStringW& filename) {

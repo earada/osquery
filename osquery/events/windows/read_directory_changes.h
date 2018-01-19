@@ -47,7 +47,7 @@ struct RDChangesSubscriptionContext : public SubscriptionContext {
 
 struct RDChangesEventContext : public EventContext {
  public:
-  /// A string path parsed from the inotify_event.
+  /// A string path parsed from the event.
   std::string path;
 
   /// A string action representing the event action.
@@ -100,8 +100,7 @@ class RDChangesEventPublisher
   void buildExcludePathsSet();
 
   /// Helper method to parse a subscription and add an equivalent monitor.
-  bool monitorSubscription(RDChangesSubscriptionContextRef& sc,
-                           bool add_watch = true);
+  std::set<std::string> monitorSubscription(RDChangesSubscriptionContextRef& sc);
 
   /**
    * @brief Add a monitor on this path.
@@ -117,13 +116,18 @@ class RDChangesEventPublisher
    */
   bool addMonitor(const std::string& path,
                   RDChangesSubscriptionContextRef& sc,
-                  bool recursive,
-                  bool add_watch = true);
+                  bool recursive);
+
+  /// Count the number of subscriptioned paths.
+  size_t numSubscriptionedPaths() const;
 
   /// Helper method to get a message from queue.
   bool Pop(DWORD& action, CStringW& filename);
 
  private:
+  /// Set of paths to monitor, determined by a configure step.
+  std::set<std::string> paths_;
+
   /// Events pertaining to these paths not to be propagated.
   ExcludePathSet exclude_paths_;
 
@@ -138,5 +142,12 @@ class RDChangesEventPublisher
 
   /// Thread-safe queue to communicate with CReadChangesServer.
   rdcp::CThreadSafeQueue<Message> queue;
+
+ public:
+  friend class ReadDirectoryChangesTests;
+  FRIEND_TEST(ReadDirectoryChangesTests, test_register_event_pub);
+  FRIEND_TEST(ReadDirectoryChangesTests, test_rdchanges_match_subscription);
+  FRIEND_TEST(ReadDirectoryChangesTests, test_rdchanges_recursion);
+  FRIEND_TEST(ReadDirectoryChangesTests, test_rdchanges_embedded_wildcards);
 };
 }
