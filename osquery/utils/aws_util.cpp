@@ -44,6 +44,7 @@ namespace osquery {
 
 FLAG(string, aws_access_key_id, "", "AWS access key ID");
 FLAG(string, aws_secret_access_key, "", "AWS secret access key");
+FLAG(string, aws_session_token, "", "AWS session token");
 FLAG(string,
      aws_profile_name,
      "",
@@ -192,7 +193,8 @@ OsqueryFlagsAWSCredentialsProvider::GetAWSCredentials() {
     return Aws::Auth::AWSCredentials("", "");
   }
   return Aws::Auth::AWSCredentials(FLAGS_aws_access_key_id,
-                                   FLAGS_aws_secret_access_key);
+                                   FLAGS_aws_secret_access_key,
+                                   FLAGS_aws_session_token);
 }
 
 Aws::Auth::AWSCredentials
