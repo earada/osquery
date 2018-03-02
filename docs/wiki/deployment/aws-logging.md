@@ -11,6 +11,7 @@ Some configuration is shared between the two plugins:
 --aws_profile_name VALUE                AWS config profile to use for auth and region config
 --aws_region VALUE                      AWS region override
 --aws_secret_access_key VALUE           AWS secret access key override
+--aws_session_token VALUE               AWS session token associated, if present
 --aws_sts_arn_role VALUE                AWS STS assume role ARN
 --aws_sts_region VALUE                  AWS STS assume role region
 --aws_sts_session_name VALUE            AWS STS session name
