@@ -1,5 +1,4 @@
 
-
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSAvoidUsingWriteHost", '', Scope = "Function", Target = "*")]
 
 # Import the osquery utility functions
@@ -11,20 +10,29 @@ if (-not (Test-Path $utils)) {
 }
 . $utils
 
+
 function Prepare-Build() {
   param(
-    [string] $configPath = '',
     [string] $packsPath = $(Join-Path $(Get-Location) 'packs'),
     [string] $certsPath = '',
-    [string] $flagsPath = '',
     [string] $shell = 'build\windows10\osquery\Release\osqueryi.exe',
     [string] $daemon = 'build\windows10\osquery\Release\osqueryd.exe',
     [string] $version = '0.0.0',
     [array] $Extras = @()
   )
 
-
   $workingDir = Get-Location
+  $outdir = $(Join-Path $(Get-Location) 'out')
+
+  if (Test-Path $outdir) {
+      Remove-Item -Recurse -Force $outdir
+      New-Item -ItemType directory -Path $outdir
+  }
+
+  $zipfile = $(Join-Path $workingDir osquery.zip)
+  if (Test-Path $zipfile) {
+      Remove-Item -Force $zipfile
+  }
 
   if ($PSVersionTable.PSVersion.Major -lt 5) {
     Write-Host '[-] Powershell 5.0 or great is required for this script.' `
@@ -44,12 +52,6 @@ function Prepare-Build() {
     Write-Host $msg -ForegroundColor Yellow
   }
 
-  # bundle default configuration
-  if (-not (Test-Path $configPath)) {
-    $msg = '[*] Did not find example configuration, skipping.'
-    Write-Host $msg -ForegroundColor Yellow
-  }
-
   # bundle default packs
   if (-not (Test-Path $packsPath)) {
     $msg = '[*] Did not find example packs, skipping.'
@@ -63,22 +65,44 @@ function Prepare-Build() {
   }
   Set-Location $buildPath
 
-  # if no flags file specified, create a stub to run the service
-  if ($flagsPath -eq '') {
-    $flagspath = Join-Path $buildPath 'osquery.flags'
-    Write-Output '' | Out-File $flagspath -NoNewline
-  }
+  Copy-Item -Recurse -Force $certsPath $(Join-Path $outdir 'certs')
+  Copy-Item -Recurse -Force $packsPath $(Join-Path $outdir 'packs')
+  Copy-Item -Force $shell $outdir
+  Copy-Item -Force $daemon $outdir
+  Copy-Item -Force "$scriptPath\tools\manage-osqueryd.ps1" $outdir
 
-  # We take advantage of a trick with WiX to copy folders
-  Copy-Item -Recurse -Force $certsPath $(Join-Path $(Get-Location) 'certs')
-  Copy-Item -Recurse -Force $packsPath $(Join-Path $(Get-Location) 'packs')
-  $iconPath = Join-Path $scriptPath 'tools\osquery.ico'
-  Copy-Item -Force $iconPath "$buildPath\osquery.ico"
+  $lic = Join-Path $scriptPath 'LICENSE'
+  Copy-Item -Force $lic $(Join-Path $outdir 'LICENSE.txt')
+
+  $verification = Join-Path $outdir 'VERIFICATION.txt'
+  $verMessage =
+  @'
+To verify the osquery binaries are valid and not corrupted, one can run one of the following:
+
+C:\Users\> Get-FileHash -Algorithm SHA256 .\build\windows10\osquery\Release\osqueryd.exe
+C:\Users\> Get-FileHash -Algorithm SHA1 .\build\windows10\osquery\Release\osqueryd.exe
+C:\Users\> Get-FileHash -Algorithm MD5 .\build\windows10\osquery\Release\osqueryd.exe
+
+And verify that the digests match one of the below values:
+
+'@
+  $verMessage += 'SHA256: ' + (Get-FileHash -Algorithm SHA256 $daemon).Hash + "`r`n"
+  $verMessage += 'SHA1: ' + (Get-FileHash -Algorithm SHA1 $daemon).Hash + "`r`n"
+  $verMessage += 'MD5: ' + (Get-FileHash -Algorithm MD5 $daemon).Hash + "`r`n"
+
+  $verMessage | Out-File -Encoding "UTF8" $verification
+
+  $7z = (Get-Command '7z.exe').Source
+  # This bundles up all of the files we distribute.
+  $7zArgs = @(
+    'a',
+    "$zipfile",
+    "$outdir\*"
+  )
+  Start-OsqueryProcess $7z $7zArgs
 
   Set-Location $workingDir
 }
-
-
 
 
 function Main() {
@@ -110,7 +134,7 @@ function Main() {
   $version = $version.trim()
 
 
-    Write-Host '[*] Building osquery MSI' -ForegroundColor Cyan
+    Write-Host '[*] Preparing package blob' -ForegroundColor Cyan
     $chocoPath = [System.Environment]::GetEnvironmentVariable('ChocolateyInstall', 'Machine')
     $certs = $(Join-Path $chocoPath 'lib\openssl\local\certs')
     if ($ConfigFilePath -eq '') {
@@ -119,8 +143,6 @@ function Main() {
     Prepare-Build -shell $shell `
                    -daemon $daemon `
                    -certsPath $certs `
-                   -flagsPath $FlagFilePath `
-                   -configPath $ConfigFilePath `
                    -version $latest `
                    -extras $Extras
 
