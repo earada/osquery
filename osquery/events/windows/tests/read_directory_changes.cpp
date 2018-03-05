@@ -27,20 +27,21 @@ class ReadDirectoryChangesTests : public testing::Test {
     Registry::get().registry("config_parser")->setUp();
 
     // Create a basic path trigger, this is a file path.
+    kTestWorkingDirectory = "C:\\Windows\\Temp\\";
     real_test_path = kTestWorkingDirectory + "rdchanges-trigger" +
                      std::to_string(rand() % 10000 + 10000);
     // Create a similar directory for embedded paths and directories.
-    real_test_dir = kTestWorkingDirectory + "rdchanges-triggers" +
-                    std::to_string(rand() % 10000 + 10000);
+    real_test_dir = kTestWorkingDirectory + std::to_string(rand() % 10000 + 10000);
 
     // Create the embedded paths.
-    real_test_dir_path = real_test_dir + "/1";
-    real_test_sub_dir = real_test_dir + "/2";
-    real_test_sub_dir_path = real_test_sub_dir + "/1";
+    real_test_dir_path = real_test_dir + "\\1";
+    real_test_sub_dir = real_test_dir + "\\2";
+    real_test_sub_dir_path = real_test_sub_dir + "\\1";
   }
 
   void TearDown() override {
     // End the event loops, and join on the threads.
+    removePath(real_test_path_dir);
     removePath(real_test_dir);
   }
 
@@ -100,6 +101,9 @@ class ReadDirectoryChangesTests : public testing::Test {
 
   /// Internal state managers: event publisher thread.
   std::thread temp_thread_;
+
+  /// Transient paths ./rdchanges-trigger.
+  std::string real_test_path_dir;
 
   /// Transient paths ./rdchanges-trigger.
   std::string real_test_path;
@@ -181,16 +185,14 @@ TEST_F(ReadDirectoryChangesTests, test_rdchanges_match_subscription) {
     auto ec = event_pub->createEventContext();
     ec->path = "C:\\";
     EXPECT_FALSE(event_pub->shouldFire(sc, ec));
-    ec->path = "C:\\Windows";
-    EXPECT_FALSE(event_pub->shouldFire(sc, ec));
-    ec->path = "C:\\Windows\\System";
+    ec->path = "C:\\Windows\\";
     EXPECT_FALSE(event_pub->shouldFire(sc, ec));
     ec->path = "C:\\Windows\\System32\\calc.exe";
     EXPECT_FALSE(event_pub->shouldFire(sc, ec));
     ec->path = "C:\\Windows\\System32\\cmd.exe";
     EXPECT_TRUE(event_pub->shouldFire(sc, ec));
   }
-  EventFactory::deregisterEventPublisher("fsevents");
+  EventFactory::deregisterEventPublisher("rdchanges");
 }
 
 class TestRDChangesEventSubscriber
@@ -281,7 +283,7 @@ TEST_F(ReadDirectoryChangesTests, test_rdchanges_run) {
 
   // Create a subscription context
   auto mc = std::make_shared<RDChangesSubscriptionContext>();
-  mc->path = real_test_path;
+  mc->path = kTestWorkingDirectory;
   status = EventFactory::addSubscription("rdchanges",
       Subscription::create("TestRDChangesEventSubscriber", mc));
   EXPECT_TRUE(status.ok());
@@ -300,148 +302,5 @@ TEST_F(ReadDirectoryChangesTests, test_rdchanges_run) {
   EXPECT_TRUE(event_pub_->numEvents() > 0);
   EventFactory::end();
   temp_thread.join();
-}
-
-TEST_F(ReadDirectoryChangesTests, test_rdchanges_fire_event) {
-  // Assume event type is registered.
-  StartEventLoop();
-  auto sub = std::make_shared<TestRDChangesEventSubscriber>();
-  EventFactory::registerEventSubscriber(sub);
-
-  // Create a subscriptioning context, note the added Event to the symbol
-  auto sc = sub->GetSubscription(real_test_path);
-  sub->subscribe(&TestRDChangesEventSubscriber::SimpleCallback, sc);
-  event_pub_->configure();
-
-  TriggerEvent(real_test_path);
-  sub->WaitForEvents(kMaxEventLatency);
-
-  // Make sure our expected event fired (aka subscription callback was called).
-  EXPECT_TRUE(sub->count() > 0);
-  StopEventLoop();
-}
-
-TEST_F(ReadDirectoryChangesTests, test_rdchanges_event_action) {
-  // Assume event type is registered.
-  StartEventLoop();
-  auto sub = std::make_shared<TestRDChangesEventSubscriber>();
-  EventFactory::registerEventSubscriber(sub);
-
-  auto sc = sub->GetSubscription(real_test_path);
-  sub->subscribe(&TestRDChangesEventSubscriber::Callback, sc);
-  event_pub_->configure();
-
-  TriggerEvent(real_test_path);
-  sub->WaitForEvents(kMaxEventLatency, 2);
-
-  // Make sure the rdchanges action was expected.
-  EXPECT_GT(sub->actions().size(), 0U);
-  if (sub->actions().size() >= 2) {
-    EXPECT_EQ(sub->actions()[0], "UPDATED");
-  }
-  StopEventLoop();
-}
-
-TEST_F(ReadDirectoryChangesTests, test_rdchanges_directory_watch) {
-  StartEventLoop();
-
-  auto sub = std::make_shared<TestRDChangesEventSubscriber>();
-  EventFactory::registerEventSubscriber(sub);
-
-  fs::create_directory(real_test_dir);
-  fs::create_directory(real_test_sub_dir);
-
-  // Subscribe to the directory inode
-  auto mc = sub->createSubscriptionContext();
-  mc->path = real_test_dir;
-  mc->recursive = true;
-  sub->subscribe(&TestRDChangesEventSubscriber::Callback, mc);
-  event_pub_->configure();
-
-  // Trigger on a subdirectory's file.
-  TriggerEvent(real_test_sub_dir_path);
-
-  sub->WaitForEvents(kMaxEventLatency, 1);
-  EXPECT_TRUE(sub->count() > 0);
-  StopEventLoop();
-}
-
-TEST_F(ReadDirectoryChangesTests, test_rdchanges_recursion) {
-  // Create a non-registered publisher and subscriber.
-  auto pub = std::make_shared<RDChangesEventPublisher>();
-  EventFactory::registerEventPublisher(pub);
-  auto sub = std::make_shared<TestRDChangesEventSubscriber>();
-
-  // Create a mock directory structure.
-  createMockFileStructure();
-
-  // Create and test several subscriptions.
-  auto sc = sub->createSubscriptionContext();
-
-  sc->path = kFakeDirectory + "/*";
-  sub->subscribe(&TestRDChangesEventSubscriber::Callback, sc);
-  // Trigger a configure step manually.
-  pub->configure();
-
-  // Expect a single monitor on the root of the fake tree.
-  EXPECT_EQ(event_pub_->numSubscriptionedPaths(), 1U);
-  EXPECT_EQ(event_pub_->paths_.count(kFakeDirectory + "/"), 1U);
-  RemoveAll(pub);
-
-  // Make sure monitors are empty.
-  EXPECT_EQ(event_pub_->numSubscriptionedPaths(), 1U);
-
-  auto sc2 = sub->createSubscriptionContext();
-  sc2->path = kFakeDirectory + "/**";
-  sub->subscribe(&TestRDChangesEventSubscriber::Callback, sc2);
-  pub->configure();
-
-  // Expect only the directories to be monitored.
-  EXPECT_EQ(event_pub_->numSubscriptionedPaths(), 11U);
-  RemoveAll(pub);
-
-  // Use a directory structure that includes a loop.
-  boost::system::error_code ec;
-  fs::create_symlink(kFakeDirectory, kFakeDirectory + "/link", ec);
-
-  auto sc3 = sub->createSubscriptionContext();
-  sc3->path = kFakeDirectory + "/**";
-  sub->subscribe(&TestRDChangesEventSubscriber::Callback, sc3);
-  pub->configure();
-
-  // Also expect canonicalized resolution (to prevent loops).
-  EXPECT_EQ(event_pub_->numSubscriptionedPaths(), 11U);
-  RemoveAll(pub);
-
-  // Remove mock directory structure.
-  tearDownMockFileStructure();
-  EventFactory::deregisterEventPublisher("rdchanges");
-}
-
-TEST_F(ReadDirectoryChangesTests, test_rdchanges_embedded_wildcards) {
-  // Assume event type is not registered.
-  event_pub_ = std::make_shared<RDChangesEventPublisher>();
-  EventFactory::registerEventPublisher(event_pub_);
-
-  auto sub = std::make_shared<TestRDChangesEventSubscriber>();
-  EventFactory::registerEventSubscriber(sub);
-
-  // Create ./rdchanges-triggers/2/1/.
-  fs::create_directories(real_test_dir + "/2/1");
-
-  // Create a subscription to match an embedded wildcard: "*"
-  // The assumption is a watch will be created on the 'most-specific' directory
-  // before the wildcard request.
-  auto mc = sub->createSubscriptionContext();
-  mc->path = real_test_dir + "/*/1";
-  mc->recursive = true;
-  sub->subscribe(&TestRDChangesEventSubscriber::Callback, mc);
-
-  // Now the publisher must be configured.
-  event_pub_->configure();
-
-  // Assume there is one watched path: real_test_dir.
-  ASSERT_EQ(event_pub_->numSubscriptionedPaths(), 1U);
-  EXPECT_EQ(event_pub_->paths_.count(real_test_dir + "/2/1/"), 1U);
 }
 }
