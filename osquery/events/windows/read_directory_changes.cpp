@@ -22,13 +22,20 @@ std::map<int, std::string> kMaskActions = {
 REGISTER(RDChangesEventPublisher, "event_publisher", "rdchanges");
 
 Status RDChangesEventPublisher::setUp() {
+  WriteLock lock(mutex_);
   thread = NULL;
   thread_id = 0;
-  server = new rdcp::CReadChangesServer(&queue);
+  if (server == NULL)
+    server = new rdcp::CReadChangesServer(&queue);
   return Status(0, "OK");
 }
 
+void RDChangesEventPublisher::stop() {
+  tearDown();
+}
+
 void RDChangesEventPublisher::tearDown() {
+  WriteLock lock(mutex_);
   if (thread) {
     ::QueueUserAPC(rdcp::CReadChangesServer::TerminateProc,
                    thread,
@@ -41,12 +48,14 @@ void RDChangesEventPublisher::tearDown() {
   }
   if (server) {
     delete server;
+    server = NULL;
   }
 }
 
 void RDChangesEventPublisher::configure() {
   buildExcludePathsSet();
 
+  WriteLock lock(mutex_);
   paths_.clear();
   for (auto& sub : subscriptions_) {
     auto sc = getSubscriptionContext(sub->context);
@@ -69,7 +78,7 @@ std::set<std::string> RDChangesEventPublisher::monitorSubscription(
     // directory instead. Apply a fnmatch on fired events to filter leafs.
     auto fullpath = fs::path(sc->path);
     if (fullpath.filename().string().find('*') != std::string::npos) {
-      discovered = fullpath.parent_path().string() + '/';
+      discovered = fullpath.parent_path().string() + '\\';
     }
 
     if (discovered.find('*') != std::string::npos) {
@@ -86,9 +95,9 @@ std::set<std::string> RDChangesEventPublisher::monitorSubscription(
     }
   }
 
-  if (isDirectory(discovered) && discovered.back() != '/') {
-    sc->path += '/';
-    discovered += '/';
+  if (isDirectory(discovered) && discovered.back() != '\\') {
+    sc->path += '\\';
+    discovered += '\\';
   }
 
   addMonitor(discovered, sc, sc->recursive);
@@ -173,7 +182,7 @@ Status RDChangesEventPublisher::run() {
 bool RDChangesEventPublisher::shouldFire(const RDChangesSubscriptionContextRef& sc,
                                          const RDChangesEventContextRef& ec) const {
   // exclude paths should be applied at last
-  auto path = ec->path.substr(0, ec->path.rfind('/'));
+  auto path = ec->path.substr(0, ec->path.rfind('\\'));
   // Need to have two finds,
   // what if somebody excluded an individual file inside a directory
   if (!exclude_paths_.empty() &&

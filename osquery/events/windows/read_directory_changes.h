@@ -86,6 +86,7 @@ class RDChangesEventPublisher
 
   /// Another alias for `::end` or `::stop`.
   void tearDown() override;
+  void stop() override;
 
   /// Entrypoint to the run loop
   Status run() override;
@@ -141,6 +142,8 @@ class RDChangesEventPublisher
 
   /// Thread-safe queue to communicate with CReadChangesServer.
   rdcp::CThreadSafeQueue<Message> queue;
+
+  mutable Mutex mutex_;
 
  public:
   friend class ReadDirectoryChangesTests;
