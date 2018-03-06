@@ -138,24 +138,36 @@ Status handleRuleFiles(const std::string& category,
     std::string rule = item.GetString();
     int errors = 0;
 
-    if (yara_uri.length()) {
+    if (FLAGS_yara_tls_endpoint.length()) {
       fprintf(stderr, "YARA RULE FILE: %s - flag=%s url=%s\n", rule.c_str(), FLAGS_yara_tls_endpoint.c_str(), yara_uri.c_str());
 
       pt::ptree params;
       std::string response;
       params.put("_verb", "POST");
-      params.put("path", rule);
+      params.put<std::string>("node_key", getNodeKey("tls"));
+      params.put<std::string>("path", rule);
       auto tls_result = TLSRequestHelper::go<JSONSerializer>(
         yara_uri, params, response, FLAGS_yara_tls_max_attempts
       );
-      fprintf(stderr, "response = %s\n", response.c_str());
+      fprintf(stderr, "response = %s, ok = %d\n", response.c_str(), tls_result.ok());
 
       compiled = true;
       if (!tls_result.ok() || !response.length()) {
         yr_compiler_destroy(compiler);
         return Status(1, "Endpoint did not return rule text: " + rule);
       }
-      errors = yr_compiler_add_string(compiler, response.c_str(), nullptr);
+
+      pt::ptree tree;
+      try {
+        std::stringstream input;
+        input << response;
+        pt::read_json(input, tree);
+      } catch (const pt::json_parser::json_parser_error& /* e */) {
+        VLOG(1) << "Could not parse JSON from TLS yara API";
+        return Status(1, "Could not parse JSON from TLS yara API: " + rule);
+      }
+
+      errors = yr_compiler_add_string(compiler, tree.get("yara", "").c_str(), nullptr);
 
     } else {
       if (rule[0] != '/') {
