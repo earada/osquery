@@ -15,8 +15,21 @@
 #include <osquery/logger.h>
 
 #include "osquery/tables/yara/yara_utils.h"
+#include "osquery/remote/serializers/json.h"
+#include "osquery/remote/utility.h"
 
 namespace osquery {
+
+FLAG(string,
+     yara_tls_endpoint,
+     "",
+     "TLS/HTTPS endpoint for distributed yara retrieval"
+)
+
+FLAG(uint64,
+     yara_tls_max_attempts,
+     3,
+     "Number of times to attempt a request")
 
 /**
  * The callback used when there are compilation problems in the rules.
@@ -108,7 +121,8 @@ Status compileSingleFile(const std::string& file, YR_RULES** rules) {
  */
 Status handleRuleFiles(const std::string& category,
                        const rapidjson::Value& rule_files,
-                       std::map<std::string, YR_RULES*>& rules) {
+                       std::map<std::string, YR_RULES*>& rules,
+                       std::string yara_uri) {
   YR_COMPILER* compiler = nullptr;
   int result = yr_compiler_create(&compiler);
   if (result != ERROR_SUCCESS) {
@@ -122,58 +136,82 @@ Status handleRuleFiles(const std::string& category,
   for (const auto& item : rule_files.GetArray()) {
     YR_RULES* tmp_rules = nullptr;
     std::string rule = item.GetString();
-    if (rule[0] != '/') {
-      rule = kYARAHome + rule;
-    }
+    int errors = 0;
 
-    // First attempt to load the file, in case it is saved (pre-compiled)
-    // rules. Sadly there is no way to load multiple compiled rules in
-    // succession. This means that:
-    //
-    // saved1, saved2
-    // results in saved2 being the only file used.
-    //
-    // Also, mixing source and saved rules results in the saved rules being
-    // overridden by the combination of the source rules once compiled, e.g.:
-    //
-    // file1, saved1
-    // result in file1 being the only file used.
-    //
-    // If you want to use saved rule files you must have them all in a single
-    // file. This is easy to accomplish with yarac(1).
-    result = yr_rules_load(rule.c_str(), &tmp_rules);
-    if (result != ERROR_SUCCESS && result != ERROR_INVALID_FILE) {
-      yr_compiler_destroy(compiler);
-      return Status(1, "YARA load error " + std::to_string(result));
-    } else if (result == ERROR_SUCCESS) {
-      // If there are already rules there, destroy them and put new ones in.
-      if (rules.count(category) > 0) {
-        yr_rules_destroy(rules[category]);
-      }
+    if (yara_uri.length()) {
+      fprintf(stderr, "YARA RULE FILE: %s - flag=%s url=%s\n", rule.c_str(), FLAGS_yara_tls_endpoint.c_str(), yara_uri.c_str());
 
-      rules[category] = tmp_rules;
-    } else {
+      pt::ptree params;
+      std::string response;
+      params.put("_verb", "POST");
+      params.put("path", rule);
+      auto tls_result = TLSRequestHelper::go<JSONSerializer>(
+        yara_uri, params, response, FLAGS_yara_tls_max_attempts
+      );
+      fprintf(stderr, "response = %s\n", response.c_str());
+
       compiled = true;
-      // Try to compile the rules.
-      FILE* rule_file = fopen(rule.c_str(), "r");
-
-      if (rule_file == nullptr) {
+      if (!tls_result.ok() || !response.length()) {
         yr_compiler_destroy(compiler);
-        return Status(1, "Could not open file: " + rule);
+        return Status(1, "Endpoint did not return rule text: " + rule);
+      }
+      errors = yr_compiler_add_string(compiler, response.c_str(), nullptr);
+
+    } else {
+      if (rule[0] != '/') {
+        rule = kYARAHome + rule;
       }
 
-      int errors =
-          yr_compiler_add_file(compiler, rule_file, nullptr, rule.c_str());
-
-      fclose(rule_file);
-      rule_file = nullptr;
-
-      if (errors > 0) {
+      // First attempt to load the file, in case it is saved (pre-compiled)
+      // rules. Sadly there is no way to load multiple compiled rules in
+      // succession. This means that:
+      //
+      // saved1, saved2
+      // results in saved2 being the only file used.
+      //
+      // Also, mixing source and saved rules results in the saved rules being
+      // overridden by the combination of the source rules once compiled, e.g.:
+      //
+      // file1, saved1
+      // result in file1 being the only file used.
+      //
+      // If you want to use saved rule files you must have them all in a single
+      // file. This is easy to accomplish with yarac(1).
+      result = yr_rules_load(rule.c_str(), &tmp_rules);
+      if (result != ERROR_SUCCESS && result != ERROR_INVALID_FILE) {
         yr_compiler_destroy(compiler);
-        // Errors printed via callback.
-        return Status(1, "Compilation errors");
+        return Status(1, "YARA load error " + std::to_string(result));
+      } else if (result == ERROR_SUCCESS) {
+        // If there are already rules there, destroy them and put new ones in.
+        if (rules.count(category) > 0) {
+          yr_rules_destroy(rules[category]);
+        }
+
+        rules[category] = tmp_rules;
+      } else {
+        compiled = true;
+        // Try to compile the rules.
+        FILE* rule_file = fopen(rule.c_str(), "r");
+
+        if (rule_file == nullptr) {
+          yr_compiler_destroy(compiler);
+          return Status(1, "Could not open file: " + rule);
+        }
+
+        errors = yr_compiler_add_file(compiler, rule_file, nullptr, rule.c_str());
+
+        fclose(rule_file);
+        rule_file = nullptr;
+
       }
     }
+
+    if (errors > 0) {
+      yr_compiler_destroy(compiler);
+      // Errors printed via callback.
+      return Status(1, "Compilation errors");
+    }
+
   }
 
   if (compiled) {
@@ -241,6 +279,7 @@ int YARACallback(int message, void* message_data, void* user_data) {
 }
 
 Status YARAConfigParserPlugin::setUp() {
+  yara_uri_ = TLSRequestHelper::makeURI(FLAGS_yara_tls_endpoint);
   int result = yr_initialize();
   if (result != ERROR_SUCCESS) {
     LOG(WARNING) << "Unable to initialize YARA (" << result << ")";
@@ -266,7 +305,7 @@ Status YARAConfigParserPlugin::update(const std::string& source,
       for (const auto& element : data_.doc()["signatures"].GetObject()) {
         std::string category = element.name.GetString();
         VLOG(1) << "Compiling YARA signature group: " << category;
-        auto status = handleRuleFiles(category, element.value, rules_);
+        auto status = handleRuleFiles(category, element.value, rules_, yara_uri_);
         if (!status.ok()) {
           VLOG(1) << "YARA rule compile error: " << status.getMessage();
           return status;

@@ -63,6 +63,8 @@ class YARAConfigParserPlugin : public ConfigParserPlugin {
  private:
   // Store compiled rules in a map (group => rules).
   std::map<std::string, YR_RULES*> rules_;
+  std::string yara_uri_;
+
 
   /// Store the signatures and file_paths and compile the rules.
   Status update(const std::string& source, const ParserConfig& config) override;
