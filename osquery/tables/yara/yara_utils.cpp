@@ -46,6 +46,56 @@ void YARACompilerCallback(int error_level,
   }
 }
 
+
+/**
+ * Download yara rule from endpoint
+ */
+Status downloadYaraRule(const std::string rule, YR_COMPILER* compiler) {
+  std::string yara_uri = TLSRequestHelper::makeURI(FLAGS_yara_tls_endpoint);
+  VLOG(1) << "YARA RULE FILE: file=" << rule  << "endpoint=" << FLAGS_yara_tls_endpoint << "url=" << yara_uri;
+
+  pt::ptree params;
+  std::string response;
+  params.put("_verb", "POST");
+  params.put<std::string>("node_key", getNodeKey("tls"));
+  params.put<std::string>("path", rule);
+  auto tls_result = TLSRequestHelper::go<JSONSerializer>(
+    yara_uri, params, response, FLAGS_yara_tls_max_attempts
+  );
+  VLOG(1) << "YARA response=" << response;
+
+  if (!tls_result.ok() || !response.length()) {
+    yr_compiler_destroy(compiler);
+    LOG(ERROR) << "TLS yara API did not return data";
+    return Status(1, "Endpoint did not return rule text: " + rule);
+  }
+
+  pt::ptree tree;
+  try {
+    std::stringstream input;
+    input << response;
+    pt::read_json(input, tree);
+  } catch (const pt::json_parser::json_parser_error& /* e */) {
+    LOG(ERROR) << "Could not parse JSON from TLS yara API";
+    return Status(1, "Could not parse JSON from TLS yara API: " + rule);
+  }
+
+  if (!tree.get("yara", "").length()) {
+    LOG(ERROR) << "TLS yara api returned blank yara rule";
+    return Status(1, "TLS yara api returned blank yara rule: " + rule);
+  }
+
+  int errors = yr_compiler_add_string(compiler, tree.get("yara", "").c_str(), nullptr);
+  if (errors > 0) {
+    yr_compiler_destroy(compiler);
+    // Errors printed via callback.
+    return Status(1, "Compilation errors");
+  }
+
+  return Status(0, "OK");
+}
+
+
 /**
  * Compile a single rule file and load it into rule pointer.
  */
@@ -60,40 +110,49 @@ Status compileSingleFile(const std::string& file, YR_RULES** rules) {
   yr_compiler_set_callback(compiler, YARACompilerCallback, nullptr);
 
   bool compiled = false;
+
   YR_RULES* tmp_rules;
   VLOG(1) << "Loading YARA signature file: " << file;
 
-  // First attempt to load the file, in case it is saved (pre-compiled)
-  // rules.
-  //
-  // If you want to use saved rule files you must have them all in a single
-  // file. This is easy to accomplish with yarac(1).
-  result = yr_rules_load(file.c_str(), &tmp_rules);
-  if (result != ERROR_SUCCESS && result != ERROR_INVALID_FILE) {
-    yr_compiler_destroy(compiler);
-    return Status(1, "Error loading YARA rules: " + std::to_string(result));
-  } else if (result == ERROR_SUCCESS) {
-    *rules = tmp_rules;
-  } else {
-    compiled = true;
-    // Try to compile the rules.
-    FILE* rule_file = fopen(file.c_str(), "r");
-
-    if (rule_file == nullptr) {
-      yr_compiler_destroy(compiler);
-      return Status(1, "Could not open file: " + file);
+  if (FLAGS_yara_tls_endpoint.length()) {
+    Status tmpstatus = downloadYaraRule(file, compiler);
+    if (!tmpstatus.ok()) {
+        LOG(ERROR) << "Failed to load rule from yara tls endpoint: " << file;
+        return tmpstatus;
     }
-
-    int errors =
-        yr_compiler_add_file(compiler, rule_file, nullptr, file.c_str());
-
-    fclose(rule_file);
-    rule_file = nullptr;
-
-    if (errors > 0) {
+    compiled = true;
+  } else {
+    // First attempt to load the file, in case it is saved (pre-compiled)
+    // rules.
+    //
+    // If you want to use saved rule files you must have them all in a single
+    // file. This is easy to accomplish with yarac(1).
+    result = yr_rules_load(file.c_str(), &tmp_rules);
+    if (result != ERROR_SUCCESS && result != ERROR_INVALID_FILE) {
       yr_compiler_destroy(compiler);
-      // Errors printed via callback.
-      return Status(1, "Compilation errors");
+      return Status(1, "Error loading YARA rules: " + std::to_string(result));
+    } else if (result == ERROR_SUCCESS) {
+      *rules = tmp_rules;
+    } else {
+      compiled = true;
+      // Try to compile the rules.
+      FILE* rule_file = fopen(file.c_str(), "r");
+
+      if (rule_file == nullptr) {
+        yr_compiler_destroy(compiler);
+        return Status(1, "Could not open file: " + file);
+      }
+
+      int errors =
+          yr_compiler_add_file(compiler, rule_file, nullptr, file.c_str());
+
+      if (errors > 0) {
+        yr_compiler_destroy(compiler);
+        // Errors printed via callback.
+        return Status(1, "Compilation errors");
+      }
+      fclose(rule_file);
+      rule_file = nullptr;
     }
   }
 
@@ -121,8 +180,7 @@ Status compileSingleFile(const std::string& file, YR_RULES** rules) {
  */
 Status handleRuleFiles(const std::string& category,
                        const rapidjson::Value& rule_files,
-                       std::map<std::string, YR_RULES*>& rules,
-                       std::string yara_uri) {
+                       std::map<std::string, YR_RULES*>& rules) {
   YR_COMPILER* compiler = nullptr;
   int result = yr_compiler_create(&compiler);
   if (result != ERROR_SUCCESS) {
@@ -136,39 +194,14 @@ Status handleRuleFiles(const std::string& category,
   for (const auto& item : rule_files.GetArray()) {
     YR_RULES* tmp_rules = nullptr;
     std::string rule = item.GetString();
-    int errors = 0;
 
     if (FLAGS_yara_tls_endpoint.length()) {
-      fprintf(stderr, "YARA RULE FILE: %s - flag=%s url=%s\n", rule.c_str(), FLAGS_yara_tls_endpoint.c_str(), yara_uri.c_str());
-
-      pt::ptree params;
-      std::string response;
-      params.put("_verb", "POST");
-      params.put<std::string>("node_key", getNodeKey("tls"));
-      params.put<std::string>("path", rule);
-      auto tls_result = TLSRequestHelper::go<JSONSerializer>(
-        yara_uri, params, response, FLAGS_yara_tls_max_attempts
-      );
-      fprintf(stderr, "response = %s, ok = %d\n", response.c_str(), tls_result.ok());
-
+        Status tmpstatus = downloadYaraRule(rule, compiler);
+      if (!tmpstatus.ok()) {
+        LOG(ERROR) << "Failed to load rule from yara tls endpoint: " << rule;
+        return tmpstatus;
+      }
       compiled = true;
-      if (!tls_result.ok() || !response.length()) {
-        yr_compiler_destroy(compiler);
-        return Status(1, "Endpoint did not return rule text: " + rule);
-      }
-
-      pt::ptree tree;
-      try {
-        std::stringstream input;
-        input << response;
-        pt::read_json(input, tree);
-      } catch (const pt::json_parser::json_parser_error& /* e */) {
-        VLOG(1) << "Could not parse JSON from TLS yara API";
-        return Status(1, "Could not parse JSON from TLS yara API: " + rule);
-      }
-
-      errors = yr_compiler_add_string(compiler, tree.get("yara", "").c_str(), nullptr);
-
     } else {
       if (rule[0] != '/') {
         rule = kYARAHome + rule;
@@ -210,20 +243,18 @@ Status handleRuleFiles(const std::string& category,
           return Status(1, "Could not open file: " + rule);
         }
 
-        errors = yr_compiler_add_file(compiler, rule_file, nullptr, rule.c_str());
+        int errors = yr_compiler_add_file(compiler, rule_file, nullptr, rule.c_str());
+        if (errors > 0) {
+          yr_compiler_destroy(compiler);
+          // Errors printed via callback.
+          return Status(1, "Compilation errors");
+        }
 
         fclose(rule_file);
         rule_file = nullptr;
 
       }
     }
-
-    if (errors > 0) {
-      yr_compiler_destroy(compiler);
-      // Errors printed via callback.
-      return Status(1, "Compilation errors");
-    }
-
   }
 
   if (compiled) {
@@ -291,7 +322,6 @@ int YARACallback(int message, void* message_data, void* user_data) {
 }
 
 Status YARAConfigParserPlugin::setUp() {
-  yara_uri_ = TLSRequestHelper::makeURI(FLAGS_yara_tls_endpoint);
   int result = yr_initialize();
   if (result != ERROR_SUCCESS) {
     LOG(WARNING) << "Unable to initialize YARA (" << result << ")";
@@ -317,7 +347,7 @@ Status YARAConfigParserPlugin::update(const std::string& source,
       for (const auto& element : data_.doc()["signatures"].GetObject()) {
         std::string category = element.name.GetString();
         VLOG(1) << "Compiling YARA signature group: " << category;
-        auto status = handleRuleFiles(category, element.value, rules_, yara_uri_);
+        auto status = handleRuleFiles(category, element.value, rules_);
         if (!status.ok()) {
           VLOG(1) << "YARA rule compile error: " << status.getMessage();
           return status;
