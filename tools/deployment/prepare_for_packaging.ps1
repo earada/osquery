@@ -70,8 +70,8 @@ function Prepare-Build() {
   Copy-Item -Force $shell $outdir
   Copy-Item -Force $daemon $outdir
   Copy-Item -Force "$scriptPath\tools\manage-osqueryd.ps1" $outdir
-  Copy-Item -Force "tools\provision\chocolatey\osquery_utils.ps1" $outdir
-  Copy-Item -Force "tools\wel\osquery.man" $outdir
+  Copy-Item -Force "$scriptPath\tools\provision\chocolatey\osquery_utils.ps1" $outdir
+  Copy-Item -Force "$scriptPath\tools\wel\osquery.man" $outdir
 
   $lic = Join-Path $scriptPath 'LICENSE'
   Copy-Item -Force $lic $(Join-Path $outdir 'LICENSE.txt')
